@@ -36,10 +36,17 @@ jobs:
       - name: Install yt-dlp
         run: pip install yt-dlp
 
+      - name: Create Cookies File from Secrets
+        run: |
+          echo '${{ secrets.YOUTUBE_COOKIES_JSON }}' > cookies.json
+
       - name: Download background videos
         run: |
           mkdir -p bg_videos
           yt-dlp \
+            --cookies cookies.json \
+            --js-runtimes node \
+            --remote-components ejs:github \
             --format "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]" \
             --merge-output-format mp4 \
             -o "bg_videos/%(id)s.mp4" \
@@ -70,3 +77,4 @@ jobs:
           path: outputs_long/
           retention-days: 3
           if-no-files-found: ignore
+          
