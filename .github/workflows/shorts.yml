@@ -1,0 +1,44 @@
+name: YouTube Shorts Auto-Pipeline
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "42 15,21 * * *"
+
+jobs:
+  generate-video:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run automation (video generate only)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+        run: |
+          python shorts_automation.py --no-upload
+
+      - name: Upload video as artifact (download karein)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shorts-video-${{ github.run_id }}
+          path: outputs/
+          retention-days: 7
+          if-no-files-found: ignore
