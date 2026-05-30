@@ -10,7 +10,6 @@ Kullanim:
 import os
 import sys
 import json
-import base64
 import random
 import argparse
 import subprocess
@@ -21,7 +20,7 @@ try:
     import requests
     from dotenv import load_dotenv
     import google.generativeai as genai
-    from elevenlabs.client import ElevenLabs as ElevenLabsClient
+    from google.cloud import texttospeech
     from google_auth_oauthlib.flow import InstalledAppFlow
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
@@ -30,8 +29,8 @@ try:
     from PIL import Image, ImageDraw, ImageFont, ImageFilter
 except ImportError as e:
     print(f"[hata] Eksik paket: {e.name}")
-    print("Kurulum: pip install google-generativeai elevenlabs google-auth "
-          "google-auth-oauthlib google-api-python-client python-dotenv requests")
+    print("Kurulum: pip install google-generativeai google-cloud-texttospeech google-auth "
+          "google-auth-oauthlib google-api-python-client python-dotenv requests Pillow")
     sys.exit(1)
 
 # --------- Config ---------
@@ -49,9 +48,6 @@ BG_VIDEO_DIR = Path(os.getenv("BG_VIDEO_DIR", _default_bg))
 load_dotenv(ENV_PATH)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-ELEVENLABS_VOICE_ID = "J2FGlQG8Gd7x8uEDt2H8"
-ELEVENLABS_MODEL = "eleven_multilingual_v2"
 
 YOUTUBE_SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 VIDEO_W, VIDEO_H = 1920, 1080
@@ -116,7 +112,7 @@ def generate_script(topic):
     return data
 
 
-# --------- 2. TTS + subtitles (ElevenLabs) ---------
+# --------- 2. TTS + subtitles (Google Cloud Text-to-Speech - FREE) ---------
 LONG_ASS_HEADER = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1920
@@ -125,7 +121,7 @@ WrapStyle: 0
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alig[...]
 Style: Default,Montserrat Bold,40,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,1,0,2,40,40,40,1
 
 [Events]
@@ -198,29 +194,59 @@ def _split_ass(cues, split_at, cold_ass_path, main_ass_path):
 
 
 def generate_voice_long(text, audio_path, ass_path):
-    if not ELEVENLABS_API_KEY:
-        raise RuntimeError("ELEVENLABS_API_KEY .env'de yok")
-    client = ElevenLabsClient(api_key=ELEVENLABS_API_KEY)
-    response = client.text_to_speech.convert_with_timestamps(
-        voice_id=ELEVENLABS_VOICE_ID,
-        text=text,
-        model_id=ELEVENLABS_MODEL,
-        output_format="mp3_44100_128",
+    """Generate English TTS using Google Cloud Text-to-Speech (FREE tier)."""
+    client = texttospeech.TextToSpeechClient()
+    
+    synthesis_input = texttospeech.SynthesisInput(text=text)
+    
+    # Use English voice - Neural (faster, better quality) or Standard
+    voice = texttospeech.VoiceSelectionParams(
+        language_code="en-US",
+        name="en-US-Neural2-C",  # Professional male English voice
+        ssml_gender=texttospeech.SsmlVoiceGender.MALE,
     )
-    Path(audio_path).write_bytes(base64.b64decode(response.audio_base_64))
-    al = response.alignment
-    cues = _char_to_word_cues(
-        al.characters,
-        al.character_start_times_seconds,
-        al.character_end_times_seconds,
+    
+    audio_config = texttospeech.AudioConfig(
+        audio_encoding=texttospeech.AudioEncoding.MP3,
+        pitch=0.0,
+        speaking_rate=1.0,
     )
-    _build_ass_long(cues, ass_path)
+    
+    request = texttospeech.SynthesizeSpeechRequest(
+        input=synthesis_input,
+        voice=voice,
+        audio_config=audio_config,
+        enable_time_pointing=[texttospeech.SynthesizeSpeechRequest.TextToSpeechFeature.SSML_DIALECT],
+    )
+    
+    response = client.synthesize_speech(request=request)
+    
+    # Save audio file
+    with open(audio_path, "wb") as out:
+        out.write(response.audio_content)
+    
+    print(f"[voice] Ses olusturuldu -> {Path(audio_path).name}")
+    
+    # Get duration using ffprobe
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)],
         capture_output=True, text=True, check=True,
     )
     duration = float(out.stdout.strip())
+    
+    # Simple word timing: distribute duration across words
+    words = text.split()
+    word_duration = duration / len(words) if words else 0
+    
+    cues = []
+    current_time = 0.0
+    for word in words:
+        cues.append(_WordCue(word, current_time, current_time + word_duration))
+        current_time += word_duration
+    
+    _build_ass_long(cues, ass_path)
+    
     print(f"[voice] {duration:.1f}s ses uretildi -> {Path(audio_path).name}")
     return duration, cues
 
